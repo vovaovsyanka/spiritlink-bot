@@ -10,11 +10,28 @@ from story_manager import StoryManager
 from classifiers.classifier_manager import ClassifierManager
 from llm.llm_client import LLMClient
 from states import *
+import torch.nn as nn
 from utils import setup_logging, normalize_text
 
 # Настройка логирования
 setup_logging()
 logger = logging.getLogger(__name__)
+
+class TFIDFClassifier(nn.Module):
+    def __init__(self, input_size, num_classes):
+        super(TFIDFClassifier, self).__init__()
+        self.classifier = nn.Sequential(
+            nn.Linear(input_size,64),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(64,32),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(32,num_classes)
+        )
+    
+    def forward(self,x):
+        return self.classifier(x)
 
 # Инициализация менеджеров
 story_manager = StoryManager()

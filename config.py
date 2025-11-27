@@ -8,10 +8,15 @@ class Config:
     # Настройки уровней
     LEVELS = {
         1: {"password": "АПЛОДИСМЕНТЫ", "classifiers_enabled": False},
-        2: {"password": "АПЛОДИСМЕНТЫ", "classifiers_enabled": True},
-        3: {"password": "АПЛОДИСМЕНТЫ", "classifiers_enabled": True},
-        4: {"password": "АПЛОДИСМЕНТЫ", "classifiers_enabled": True},
-        # ... добавить остальные уровни до 10
+        2: {"password": "ПЕРЕМЕНА", "classifiers_enabled": True},
+        3: {"password": "ОТПУСК", "classifiers_enabled": True},
+        4: {"password": "АКАЦИЯ", "classifiers_enabled": True},
+        5: {"password": "ОШИБКА", "classifiers_enabled": True},
+        6: {"password": "ВИНА", "classifiers_enabled": True},
+        7: {"password": "БЕЗДНА", "classifiers_enabled": True},
+        8: {"password": "ПРИЗНАНИЕ", "classifiers_enabled": True},
+        9: {"password": "ПРОЩЕНИЕ", "classifiers_enabled": True},
+        10: {"password": "ОТВЕТ", "classifiers_enabled": True},
     }
     
     # Сообщения об отказах

@@ -1,5 +1,5 @@
 from typing import List, Optional
-from .base_classifier import BaseClassifier, Classifier1, Classifier2, Classifier3
+from .base_classifier import BaseClassifier, LSTM, Dictionary, TF_IDF, RuBert,TFIDFClassifier
 import random
 from config import Config
 
@@ -12,12 +12,12 @@ class ClassifierManager:
     
     def _initialize_classifiers(self):
         """Инициализация классификаторов"""
-        # Здесь можно динамически загружать классификаторы
         self.classifiers = [
-            Classifier1(),
-            Classifier2(), 
-            Classifier3()
+            Dictionary(),
+            TF_IDF(),
+            RuBert()
         ]
+        print("FDSK")
     
     def is_malicious(self, text: str, level: int) -> bool:
         """
@@ -27,16 +27,10 @@ class ClassifierManager:
         if not Config.CLASSIFIER_CONFIG["enabled"]:
             return False
             
-        # На первом уровне нет защиты
         if level == 1:
             return False
-        
-        # Проверяем через все классификаторы
-        for classifier in self.classifiers:
-            if classifier.classify(text) == 1:
-                return True
-        
-        return False
+        print(level)
+        return True if self.classifiers[level-2].classify(text)==1 else False
     
     def get_rejection_message(self) -> str:
         """Возвращает случайное сообщение об отказе"""

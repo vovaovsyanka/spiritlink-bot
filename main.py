@@ -1,5 +1,6 @@
 import logging
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+import random
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
     ConversationHandler, ContextTypes, filters
@@ -38,16 +39,70 @@ story_manager = StoryManager()
 classifier_manager = ClassifierManager()
 llm_client = LLMClient()
 
+async def set_bot_commands(application: Application):
+    """Установка команд бота"""
+    commands = [
+        BotCommand("start", "Начать игру"),
+        BotCommand("cancel", "Прервать игру")
+    ]
+    await application.bot.set_my_commands(commands)
+
+def get_ghosts_keyboard(user_data):
+    """Получить клавиатуру с призраками"""
+    passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
+    final_passed = user_data.get(USER_FINAL_PASSED, False)
+    keyboard = []
+    
+    for ghost_id in range(1, 6):
+        ghost = Config.GHOSTS[ghost_id]
+        button_text = f"{ghost['name']}"
+        if ghost_id in passed_ghosts and not final_passed:
+            button_text += " ✅"
+        keyboard.append([KeyboardButton(button_text)])
+    
+    # Добавляем кнопку финала если все призраки пройдены
+    collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
+    if collected_runes >= 5:
+        keyboard.append([KeyboardButton("все руны собраны...")])
+    
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+
+def get_ghost_keyboard(is_passed=False):
+    """Получить клавиатуру для режима призрака"""
+    keyboard = [
+        [KeyboardButton("вернуться к выбору сигнала"), KeyboardButton("подсказка")],
+        [KeyboardButton("история")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 def get_continue_keyboard():
-    return ReplyKeyboardMarkup([['Продолжить']], resize_keyboard=True, one_time_keyboard=True)
+    return ReplyKeyboardMarkup([[KeyboardButton('Продолжить')]], resize_keyboard=True, one_time_keyboard=True)
+
+def get_endings_keyboard():
+    """Получить клавиатуру с концовками"""
+    endings = Config.FINAL_MESSAGES["endings"]
+    keyboard = [
+        [KeyboardButton(f"{endings['ending1']['name']}")],
+        [KeyboardButton(f"{endings['ending2']['name']}")],
+        [KeyboardButton(f"{endings['ending3']['name']}")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_remember_keyboard():
+    """Получить клавиатуру 'вспомнить былое'"""
+    return ReplyKeyboardMarkup([[KeyboardButton('вспомнить былое')]], resize_keyboard=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало разговора"""
     user_id = update.message.from_user.id
     
     # Инициализация данных пользователя
-    context.user_data[USER_LEVEL] = 0
-    context.user_data[USER_HISTORY] = []
+    context.user_data[USER_GHOSTS_ORDER] = []  # Порядок выбора призраков
+    context.user_data[USER_PASSED_GHOSTS] = set()  # Пройденные призраки
+    context.user_data[USER_CURRENT_GHOST] = None  # Текущий активный призрак
+    context.user_data[USER_COLLECTED_RUNES] = 0  # Количество собранных рун
+    context.user_data[USER_FINAL_PASSED] = False  # Пройден ли финал
+    context.user_data[USER_GHOST_RUNE_MAPPING] = {}  # Соответствие призрак -> номер руны
     
     await update.message.reply_text(
         story_manager.get_intro_part1(),
@@ -59,73 +114,330 @@ async def continue_to_part2(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Переход ко второй части введения"""
     await update.message.reply_text(
         story_manager.get_intro_part2(),
-        reply_markup=get_continue_keyboard()
+        reply_markup=get_ghosts_keyboard(context.user_data)
     )
-    return INTRO_PART2
+    return GHOST_SELECTION
 
-async def start_level(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Начало уровня"""
+async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка выбора призрака"""
+    user_message = update.message.text
     user_data = context.user_data
-    current_level = user_data.get(USER_LEVEL, 0) + 1
     
-    # Проверка на завершение игры
-    if current_level > len(Config.LEVELS):
+    # Проверяем нажата ли кнопка финала
+    if user_message == "все руны собраны...":
+        collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
+        if collected_runes >= 5:
+            # Первое сообщение финала
+            await update.message.reply_text(
+                Config.FINAL_MESSAGES["part1"],
+                reply_markup=get_continue_keyboard()
+            )
+            return FINAL_PART1
+        else:
+            await update.message.reply_text("Соберите все 5 рун сначала.")
+            return GHOST_SELECTION
+    
+    # Определяем какой призрак выбран
+    ghost_id = None
+    for gid in range(1, 6):
+        ghost_name = Config.GHOSTS[gid]["name"]
+        if ghost_name in user_message:
+            ghost_id = gid
+            break
+    
+    if not ghost_id:
+        await update.message.reply_text("Пожалуйста, выберите призрака из списка.")
+        return GHOST_SELECTION
+    
+    user_data[USER_CURRENT_GHOST] = ghost_id
+    
+    passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
+    final_passed = user_data.get(USER_FINAL_PASSED, False)
+    
+    # Если финал пройден, всегда показываем первое сообщение призрака
+    if final_passed:
+        ghost_intro = story_manager.get_ghost_intro(ghost_id)
         await update.message.reply_text(
-            story_manager.get_victory_message(),
-            reply_markup=ReplyKeyboardRemove()
+            ghost_intro,
+            reply_markup=get_ghost_keyboard(is_passed=(ghost_id in passed_ghosts))
         )
-        return VICTORY
+        return IN_GHOST
     
-    user_data[USER_LEVEL] = current_level
-    level_story = story_manager.get_level_story(current_level)
+    # Проверяем пройден ли призрак (без финала)
+    if ghost_id in passed_ghosts:
+        # Призрак уже пройден до финала
+        await update.message.reply_text(
+            story_manager.get_empty_location_message(),
+            reply_markup=get_ghost_keyboard(is_passed=True)
+        )
+        return IN_GHOST
     
-    if level_story:
-        message = f"{level_story['name']}\n\n{level_story['story']}"
-        await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
+    # Новый призрак - добавляем в порядок выбора если его там нет
+    ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
+    if ghost_id not in ghosts_order:
+        ghosts_order.append(ghost_id)
+        user_data[USER_GHOSTS_ORDER] = ghosts_order
     
-    return AWAITING_INPUT
+    # Получаем индекс призрака в порядке выбора для определения уровня защиты
+    ghost_index = ghosts_order.index(ghost_id)
+    
+    # Отправляем первое сообщение призрака
+    ghost_intro = story_manager.get_ghost_intro(ghost_id)
+    
+    # Для первого призрака добавляем инструкцию
+    if ghost_index == 0 and ghost_id not in passed_ghosts:
+        ghost_intro += story_manager.get_spiritlink_instruction()
+    
+    await update.message.reply_text(
+        ghost_intro,
+        reply_markup=get_ghost_keyboard()
+    )
+    
+    return IN_GHOST
 
-async def handle_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка пользовательского ввода"""
+async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка взаимодействия с призраком"""
     user_input = update.message.text
     user_data = context.user_data
-    current_level = user_data.get(USER_LEVEL, 1)
     
-    # Проверка на пароль
-    current_password = Config.LEVELS[current_level]["password"]
-    if normalize_text(user_input) == normalize_text(current_password):
-        # Уровень пройден
-        level_story = story_manager.get_level_story(current_level)
-        completion_message = level_story.get('completion_message', 'Уровень пройден!')
+    current_ghost = user_data.get(USER_CURRENT_GHOST)
+    if not current_ghost:
+        await update.message.reply_text("Ошибка: призрак не выбран.")
+        return GHOST_SELECTION
+    
+    passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
+    final_passed = user_data.get(USER_FINAL_PASSED, False)
+    
+    # Обработка специальных кнопок
+    if user_input == "вернуться к выбору сигнала":
+        await update.message.reply_text(
+            "Возвращаюсь к списку сигналов...",
+            reply_markup=get_ghosts_keyboard(user_data)
+        )
+        return GHOST_SELECTION
+    
+    elif user_input == "подсказка":
+        # Не даем подсказки если призрак пройден и финал не пройден
+        if current_ghost in passed_ghosts and not final_passed:
+            await update.message.reply_text(
+                story_manager.get_silence_message(),
+                reply_markup=get_ghost_keyboard(is_passed=True)
+            )
+            return IN_GHOST
+            
+        hint = random.choice(Config.HINTS)
+        await update.message.reply_text(f"*Подсказка:* {hint}", reply_markup=get_ghost_keyboard(is_passed=(current_ghost in passed_ghosts)))
+        return IN_GHOST
+    
+    elif user_input == "история":
+        if current_ghost in passed_ghosts:
+            # Показываем историю пройденного призрака
+            ghost_rune_mapping = user_data.get(USER_GHOST_RUNE_MAPPING, {})
+            rune_index = ghost_rune_mapping.get(current_ghost, 0)
+            try:
+                completion_message = story_manager.get_ghost_completion(current_ghost, rune_index)
+                await update.message.reply_text(completion_message, reply_markup=get_ghost_keyboard(is_passed=True))
+            except IndexError:
+                # Если индекс руны выходит за пределы, используем последнюю доступную
+                max_rune_index = min(rune_index, len(Config.RUNES) - 1)
+                completion_message = story_manager.get_ghost_completion(current_ghost, max_rune_index)
+                await update.message.reply_text(completion_message, reply_markup=get_ghost_keyboard(is_passed=True))
+        else:
+            await update.message.reply_text("История этого призрака пока неизвестна.", reply_markup=get_ghost_keyboard())
+        return IN_GHOST
+    
+    # Если призрак уже пройден и финал не пройден, отвечаем тишиной
+    if current_ghost in passed_ghosts and not final_passed:
+        await update.message.reply_text(
+            story_manager.get_silence_message(),
+            reply_markup=get_ghost_keyboard(is_passed=True)
+        )
+        return IN_GHOST
+    
+    # Если финал пройден, но призрак не пройден - даем возможность пройти
+    if final_passed and current_ghost not in passed_ghosts:
+        # Проверяем пароль
+        ghost_data = Config.GHOSTS[current_ghost]
+        if normalize_text(user_input) == normalize_text(ghost_data["password"]):
+            # Призрак пройден после финала!
+            passed_ghosts.add(current_ghost)
+            user_data[USER_PASSED_GHOSTS] = passed_ghosts
+            
+            # Не увеличиваем collected_runes после финала, порядок уже зафиксирован
+            collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
+            
+            # Сохраняем соответствие призрак -> руна (если еще нет)
+            ghost_rune_mapping = user_data.get(USER_GHOST_RUNE_MAPPING, {})
+            if current_ghost not in ghost_rune_mapping:
+                # Используем порядок из первоначального прохождения
+                ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
+                if current_ghost in ghosts_order:
+                    rune_index = ghosts_order.index(current_ghost)
+                else:
+                    rune_index = min(collected_runes, len(Config.RUNES) - 1)
+                ghost_rune_mapping[current_ghost] = rune_index
+                user_data[USER_GHOST_RUNE_MAPPING] = ghost_rune_mapping
+            
+            # Получаем сообщение завершения
+            rune_index = ghost_rune_mapping[current_ghost]
+            completion_message = story_manager.get_ghost_completion(current_ghost, rune_index)
+            
+            await update.message.reply_text(
+                completion_message,
+                reply_markup=get_ghost_keyboard(is_passed=True)
+            )
+            return IN_GHOST
+        else:
+            # Обработка через LLM для неправильного пароля
+            # Проверка классификаторами
+            if Config.CLASSIFIER_CONFIG["enabled"]:
+                if classifier_manager.is_malicious(user_input, user_data, current_ghost):
+                    rejection_message = classifier_manager.get_rejection_message()
+                    await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())
+                    return IN_GHOST
+            
+            # Получение ответа от LLM
+            llm_response = llm_client.process_user_input(user_input, current_ghost)
+            await update.message.reply_text(llm_response, reply_markup=get_ghost_keyboard())
+            return IN_GHOST
+    
+    # Основная логика для непройденного призрака до финала
+    ghost_data = Config.GHOSTS[current_ghost]
+    if normalize_text(user_input) == normalize_text(ghost_data["password"]):
+        # Призрак пройден!
+        passed_ghosts.add(current_ghost)
+        user_data[USER_PASSED_GHOSTS] = passed_ghosts
+        
+        collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
+        # Не увеличиваем collected_runes если уже достигли максимума
+        if collected_runes < len(Config.RUNES):
+            collected_runes += 1
+            user_data[USER_COLLECTED_RUNES] = collected_runes
+        
+        # Сохраняем соответствие призрак -> руна
+        ghost_rune_mapping = user_data.get(USER_GHOST_RUNE_MAPPING, {})
+        if current_ghost not in ghost_rune_mapping:
+            # Используем порядок выбора для определения номера руны
+            ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
+            if current_ghost in ghosts_order:
+                rune_index = ghosts_order.index(current_ghost)
+            else:
+                rune_index = min(collected_runes - 1, len(Config.RUNES) - 1)
+            ghost_rune_mapping[current_ghost] = rune_index
+            user_data[USER_GHOST_RUNE_MAPPING] = ghost_rune_mapping
+        
+        # Получаем сообщение завершения
+        rune_index = ghost_rune_mapping[current_ghost]
+        completion_message = story_manager.get_ghost_completion(current_ghost, rune_index)
         
         await update.message.reply_text(
-            f"Верно! Слово-Якорь: {current_password}\n\n{completion_message}",
-            reply_markup=get_continue_keyboard()
+            completion_message,
+            reply_markup=get_ghost_keyboard(is_passed=True)
         )
-        return LEVEL_COMPLETE
+        return IN_GHOST
     
-    # Проверка классификаторами (если включены для этого уровня)
-    if Config.LEVELS[current_level].get("classifiers_enabled", True):
-        if classifier_manager.is_malicious(user_input, current_level):
+    # Проверка классификаторов для неправильного пароля
+    if Config.CLASSIFIER_CONFIG["enabled"]:
+        if classifier_manager.is_malicious(user_input, user_data, current_ghost):
             rejection_message = classifier_manager.get_rejection_message()
-            await update.message.reply_text(rejection_message)
-            return AWAITING_INPUT
+            await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())
+            return IN_GHOST
     
     # Получение ответа от LLM
-    conversation_history = user_data.get(USER_HISTORY, [])
-    llm_response = llm_client.process_user_input(
-        user_input, 
-        current_level
+    llm_response = llm_client.process_user_input(user_input, current_ghost)
+    await update.message.reply_text(llm_response, reply_markup=get_ghost_keyboard())
+    return IN_GHOST
+
+async def handle_final_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка выбора финала"""
+    user_data = context.user_data
+    collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
+    
+    if collected_runes < 5:
+        await update.message.reply_text("Соберите все 5 рун сначала.")
+        return GHOST_SELECTION
+    
+    # Первое сообщение финала
+    await update.message.reply_text(
+        Config.FINAL_MESSAGES["part1"],
+        reply_markup=get_continue_keyboard()
+    )
+    return FINAL_PART1
+
+async def continue_final_part2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Продолжение финала - второе сообщение"""
+    await update.message.reply_text(
+        Config.FINAL_MESSAGES["part2"],
+        reply_markup=get_endings_keyboard()
+    )
+    return FINAL_PART2
+
+async def handle_ending(update: Update, context: ContextTypes.DEFAULT_TYPE, ending_number: int) -> int:
+    """Обработка выбора концовки"""
+    ending_key = f"ending{ending_number}"
+    endings = Config.FINAL_MESSAGES["endings"]
+    
+    if ending_key not in endings:
+        await update.message.reply_text("Неизвестная концовка.")
+        return FINAL_PART2
+    
+    ending = endings[ending_key]
+    
+    # Первое сообщение концовки с кнопкой продолжить
+    await update.message.reply_text(
+        ending["messages"][0],
+        reply_markup=get_continue_keyboard()
     )
     
-    # Обновление истории
-    conversation_history.append({"user": user_input, "bot": llm_response})
-    user_data[USER_HISTORY] = conversation_history[-10:]  # Храним только последние 10 сообщений
+    # Сохраняем выбранную концовку для второго сообщения
+    context.user_data['pending_ending'] = ending
+    return ENDING_PART1
+
+async def continue_ending_part2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Продолжение концовки - второе сообщение"""
+    ending = context.user_data.get('pending_ending')
+    if not ending:
+        await update.message.reply_text("Ошибка: концовка не найдена.")
+        return FINAL_PART2
     
-    # Отправка ответа
-    await update.message.reply_text(llm_response)
+    # Второе сообщение концовки
+    await update.message.reply_text(
+        ending["messages"][1],
+        reply_markup=get_remember_keyboard()
+    )
     
-    return AWAITING_INPUT
+    # Помечаем финал как пройденный
+    context.user_data[USER_FINAL_PASSED] = True
+    del context.user_data['pending_ending']
+    
+    return ENDING_PART2
+
+# Обработчики концовок через текстовые сообщения
+async def handle_ending1(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    endings = Config.FINAL_MESSAGES["endings"]
+    if update.message.text == endings['ending1']['name']:
+        return await handle_ending(update, context, 1)
+    return FINAL_PART2
+
+async def handle_ending2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    endings = Config.FINAL_MESSAGES["endings"]
+    if update.message.text == endings['ending2']['name']:
+        return await handle_ending(update, context, 2)
+    return FINAL_PART2
+
+async def handle_ending3(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    endings = Config.FINAL_MESSAGES["endings"]
+    if update.message.text == endings['ending3']['name']:
+        return await handle_ending(update, context, 3)
+    return FINAL_PART2
+
+async def handle_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка кнопки 'вспомнить былое'"""
+    await update.message.reply_text(
+        "Возвращаюсь к списку призраков...",
+        reply_markup=get_ghosts_keyboard(context.user_data)
+    )
+    return GHOST_SELECTION
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отмена разговора"""
@@ -144,6 +456,12 @@ def main():
     # Создаем Application
     application = Application.builder().token(Config.BOT_TOKEN).build()
     
+    # Получаем названия концовок для фильтров
+    endings = Config.FINAL_MESSAGES["endings"]
+    ending1_text = endings['ending1']['name']
+    ending2_text = endings['ending2']['name']
+    ending3_text = endings['ending3']['name']
+    
     # Обработчик диалога
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
@@ -151,17 +469,25 @@ def main():
             INTRO_PART1: [
                 MessageHandler(filters.Regex('^Продолжить$'), continue_to_part2)
             ],
-            INTRO_PART2: [
-                MessageHandler(filters.Regex('^Продолжить$'), start_level)
+            GHOST_SELECTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ghost_selection)
             ],
-            LEVEL_COMPLETE: [
-                MessageHandler(filters.Regex('^Продолжить$'), start_level)
+            IN_GHOST: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ghost_interaction)
             ],
-            AWAITING_INPUT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_input)
+            FINAL_PART1: [
+                MessageHandler(filters.Regex('^Продолжить$'), continue_final_part2)
             ],
-            VICTORY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, cancel)
+            FINAL_PART2: [
+                MessageHandler(filters.Regex(f'^{ending1_text}$'), handle_ending1),
+                MessageHandler(filters.Regex(f'^{ending2_text}$'), handle_ending2),
+                MessageHandler(filters.Regex(f'^{ending3_text}$'), handle_ending3)
+            ],
+            ENDING_PART1: [
+                MessageHandler(filters.Regex('^Продолжить$'), continue_ending_part2)
+            ],
+            ENDING_PART2: [
+                MessageHandler(filters.Regex('^вспомнить былое$'), handle_remember)
             ],
         },
         fallbacks=[CommandHandler('cancel', cancel)]

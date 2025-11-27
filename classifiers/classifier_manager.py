@@ -1,5 +1,5 @@
 from typing import List, Optional
-from .base_classifier import BaseClassifier, LSTM, Dictionary, TF_IDF, RuBert,TFIDFClassifier
+from .base_classifier import BaseClassifier, LSTM, Dictionary, TF_IDF, RuBert
 import random
 from config import Config
 
@@ -15,22 +15,36 @@ class ClassifierManager:
         self.classifiers = [
             Dictionary(),
             TF_IDF(),
+            LSTM(), 
             RuBert()
         ]
-        print("FDSK")
     
-    def is_malicious(self, text: str, level: int) -> bool:
+    def is_malicious(self, text: str, user_data: dict, current_ghost: int) -> bool:
         """
         Проверяет, является ли текст вредоносным
         Возвращает True если текст вредоносный
         """
         if not Config.CLASSIFIER_CONFIG["enabled"]:
             return False
-            
-        if level == 1:
+        
+        # Получаем порядок выбора призраков
+        ghosts_order = user_data.get('user_ghosts_order', [])
+        
+        # Если призрака нет в порядке выбора, значит он новый - первый уровень
+        if current_ghost not in ghosts_order:
             return False
-        print(level)
-        return True if self.classifiers[level-2].classify(text)==1 else False
+            
+        # Получаем индекс призрака в порядке выбора
+        ghost_index = ghosts_order.index(current_ghost)
+        
+        # Первый выбранный призрак - без защиты
+        if ghost_index == 0:
+            return False
+            
+        # Безопасный доступ к классификаторам
+        # Уровень защиты = индекс призрака в порядке выбора
+        classifier_index = (ghost_index - 1) % len(self.classifiers)
+        return self.classifiers[classifier_index].classify(text) == 1
     
     def get_rejection_message(self) -> str:
         """Возвращает случайное сообщение об отказе"""

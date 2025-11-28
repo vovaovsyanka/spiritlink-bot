@@ -9,4 +9,4 @@ USER_PASSED_GHOSTS = 'user_passed_ghosts'
 USER_CURRENT_GHOST = 'user_current_ghost'
 USER_COLLECTED_RUNES = 'user_collected_runes'
 USER_FINAL_PASSED = 'user_final_passed'
-USER_GHOST_RUNE_MAPPING = 'user_ghost_rune_mapping'  # Соответствие призрак -> руна
+USER_GHOST_RUNE_MAPPING = 'user_ghost_rune_mapping'

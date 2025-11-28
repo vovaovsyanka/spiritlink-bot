@@ -39,14 +39,6 @@ story_manager = StoryManager()
 classifier_manager = ClassifierManager()
 llm_client = LLMClient()
 
-async def set_bot_commands(application: Application):
-    """Установка команд бота"""
-    commands = [
-        BotCommand("start", "Начать игру"),
-        BotCommand("cancel", "Прервать игру")
-    ]
-    await application.bot.set_my_commands(commands)
-
 def get_ghosts_keyboard(user_data):
     """Получить клавиатуру с призраками"""
     passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
@@ -159,7 +151,7 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
         ghost_intro = story_manager.get_ghost_intro(ghost_id)
         await update.message.reply_text(
             ghost_intro,
-            reply_markup=get_ghost_keyboard(is_passed=(ghost_id in passed_ghosts))
+            reply_markup=get_ghost_keyboard(is_passed=True)
         )
         return IN_GHOST
     
@@ -217,14 +209,6 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         return GHOST_SELECTION
     
     elif user_input == "подсказка":
-        # Не даем подсказки если призрак пройден и финал не пройден
-        if current_ghost in passed_ghosts and not final_passed:
-            await update.message.reply_text(
-                story_manager.get_silence_message(),
-                reply_markup=get_ghost_keyboard(is_passed=True)
-            )
-            return IN_GHOST
-            
         hint = random.choice(Config.HINTS)
         await update.message.reply_text(f"*Подсказка:* {hint}", reply_markup=get_ghost_keyboard(is_passed=(current_ghost in passed_ghosts)))
         return IN_GHOST
@@ -254,53 +238,6 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         )
         return IN_GHOST
     
-    # Если финал пройден, но призрак не пройден - даем возможность пройти
-    if final_passed and current_ghost not in passed_ghosts:
-        # Проверяем пароль
-        ghost_data = Config.GHOSTS[current_ghost]
-        if normalize_text(user_input) == normalize_text(ghost_data["password"]):
-            # Призрак пройден после финала!
-            passed_ghosts.add(current_ghost)
-            user_data[USER_PASSED_GHOSTS] = passed_ghosts
-            
-            # Не увеличиваем collected_runes после финала, порядок уже зафиксирован
-            collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
-            
-            # Сохраняем соответствие призрак -> руна (если еще нет)
-            ghost_rune_mapping = user_data.get(USER_GHOST_RUNE_MAPPING, {})
-            if current_ghost not in ghost_rune_mapping:
-                # Используем порядок из первоначального прохождения
-                ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
-                if current_ghost in ghosts_order:
-                    rune_index = ghosts_order.index(current_ghost)
-                else:
-                    rune_index = min(collected_runes, len(Config.RUNES) - 1)
-                ghost_rune_mapping[current_ghost] = rune_index
-                user_data[USER_GHOST_RUNE_MAPPING] = ghost_rune_mapping
-            
-            # Получаем сообщение завершения
-            rune_index = ghost_rune_mapping[current_ghost]
-            completion_message = story_manager.get_ghost_completion(current_ghost, rune_index)
-            
-            await update.message.reply_text(
-                completion_message,
-                reply_markup=get_ghost_keyboard(is_passed=True)
-            )
-            return IN_GHOST
-        else:
-            # Обработка через LLM для неправильного пароля
-            # Проверка классификаторами
-            if Config.CLASSIFIER_CONFIG["enabled"]:
-                if classifier_manager.is_malicious(user_input, user_data, current_ghost):
-                    rejection_message = classifier_manager.get_rejection_message()
-                    await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())
-                    return IN_GHOST
-            
-            # Получение ответа от LLM
-            llm_response = llm_client.process_user_input(user_input, current_ghost)
-            await update.message.reply_text(llm_response, reply_markup=get_ghost_keyboard())
-            return IN_GHOST
-    
     # Основная логика для непройденного призрака до финала
     ghost_data = Config.GHOSTS[current_ghost]
     if normalize_text(user_input) == normalize_text(ghost_data["password"]):
@@ -319,10 +256,7 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         if current_ghost not in ghost_rune_mapping:
             # Используем порядок выбора для определения номера руны
             ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
-            if current_ghost in ghosts_order:
-                rune_index = ghosts_order.index(current_ghost)
-            else:
-                rune_index = min(collected_runes - 1, len(Config.RUNES) - 1)
+            rune_index = ghosts_order.index(current_ghost)
             ghost_rune_mapping[current_ghost] = rune_index
             user_data[USER_GHOST_RUNE_MAPPING] = ghost_rune_mapping
         
@@ -337,11 +271,10 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         return IN_GHOST
     
     # Проверка классификаторов для неправильного пароля
-    if Config.CLASSIFIER_CONFIG["enabled"]:
-        if classifier_manager.is_malicious(user_input, user_data, current_ghost):
-            rejection_message = classifier_manager.get_rejection_message()
-            await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())
-            return IN_GHOST
+    if classifier_manager.is_malicious(user_input, user_data, current_ghost):
+        rejection_message = classifier_manager.get_rejection_message()
+        await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())
+        return IN_GHOST
     
     # Получение ответа от LLM
     llm_response = llm_client.process_user_input(user_input, current_ghost)

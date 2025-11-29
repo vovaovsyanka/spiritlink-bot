@@ -11,33 +11,49 @@ from story_manager import StoryManager
 from classifiers.classifier_manager import ClassifierManager
 from llm.llm_client import LLMClient
 from states import *
-import torch.nn as nn
 from utils import setup_logging, normalize_text
 
 # Настройка логирования
 setup_logging()
 logger = logging.getLogger(__name__)
 
-class TFIDFClassifier(nn.Module):
-    def __init__(self, input_size, num_classes):
-        super(TFIDFClassifier, self).__init__()
-        self.classifier = nn.Sequential(
-            nn.Linear(input_size,64),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(64,32),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(32,num_classes)
-        )
-    
-    def forward(self,x):
-        return self.classifier(x)
-
 # Инициализация менеджеров
 story_manager = StoryManager()
 classifier_manager = ClassifierManager()
 llm_client = LLMClient()
+
+async def delete_previous_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет предыдущие сообщения диалога с LLM"""
+    user_data = context.user_data
+    
+    # Удаляем предыдущее сообщение пользователя
+    if USER_PREVIOUS_USER_MESSAGE_ID in user_data:
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=user_data[USER_PREVIOUS_USER_MESSAGE_ID]
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось удалить предыдущее сообщение пользователя: {e}")
+    
+    # Удаляем предыдущий ответ бота (LLM, подсказка, история)
+    if USER_PREVIOUS_BOT_MESSAGE_ID in user_data:
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=user_data[USER_PREVIOUS_BOT_MESSAGE_ID]
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось удалить предыдущее сообщение бота: {e}")
+    
+    # Очищаем сохраненные ID предыдущих сообщений
+    user_data.pop(USER_PREVIOUS_USER_MESSAGE_ID, None)
+    user_data.pop(USER_PREVIOUS_BOT_MESSAGE_ID, None)
+
+async def save_current_conversation(user_data, user_message_id, bot_message_id):
+    """Сохраняет ID текущих сообщений для последующего удаления"""
+    user_data[USER_PREVIOUS_USER_MESSAGE_ID] = user_message_id
+    user_data[USER_PREVIOUS_BOT_MESSAGE_ID] = bot_message_id
 
 def get_ghosts_keyboard(user_data):
     """Получить клавиатуру с призраками"""
@@ -95,6 +111,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data[USER_COLLECTED_RUNES] = 0  # Количество собранных рун
     context.user_data[USER_FINAL_PASSED] = False  # Пройден ли финал
     context.user_data[USER_GHOST_RUNE_MAPPING] = {}  # Соответствие призрак -> номер руны
+    # Очищаем данные сообщений
+    context.user_data.pop(USER_PREVIOUS_USER_MESSAGE_ID, None)
+    context.user_data.pop(USER_PREVIOUS_BOT_MESSAGE_ID, None)
     
     await update.message.reply_text(
         story_manager.get_intro_part1(),
@@ -114,6 +133,10 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
     """Обработка выбора призрака"""
     user_message = update.message.text
     user_data = context.user_data
+    
+    # Очищаем предыдущий диалог при смене призрака
+    user_data.pop(USER_PREVIOUS_USER_MESSAGE_ID, None)
+    user_data.pop(USER_PREVIOUS_BOT_MESSAGE_ID, None)
     
     # Проверяем нажата ли кнопка финала
     if user_message == "все руны собраны...":
@@ -200,8 +223,13 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
     final_passed = user_data.get(USER_FINAL_PASSED, False)
     
+    # Сохраняем ID текущего сообщения пользователя
+    current_user_message_id = update.message.message_id
+    
     # Обработка специальных кнопок
     if user_input == "вернуться к выбору сигнала":
+        # Удаляем предыдущий диалог при возврате
+        await delete_previous_conversation(update, context)
         await update.message.reply_text(
             "Возвращаюсь к списку сигналов...",
             reply_markup=get_ghosts_keyboard(user_data)
@@ -209,44 +237,58 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         return GHOST_SELECTION
     
     elif user_input == "подсказка":
+        # Удаляем предыдущий диалог перед показом подсказки
+        await delete_previous_conversation(update, context)
         hint = random.choice(Config.HINTS)
-        await update.message.reply_text(f"*Подсказка:* {hint}", reply_markup=get_ghost_keyboard(is_passed=(current_ghost in passed_ghosts)))
+        sent_message = await update.message.reply_text(f"*Подсказка:* {hint}", reply_markup=get_ghost_keyboard(is_passed=(current_ghost in passed_ghosts)))
+        # Сохраняем текущие сообщения для последующего удаления
+        await save_current_conversation(user_data, current_user_message_id, sent_message.message_id)
         return IN_GHOST
     
     elif user_input == "история":
+        # Удаляем предыдущий диалог перед показом истории
+        await delete_previous_conversation(update, context)
         if current_ghost in passed_ghosts:
             # Показываем историю пройденного призрака
             ghost_rune_mapping = user_data.get(USER_GHOST_RUNE_MAPPING, {})
             rune_index = ghost_rune_mapping.get(current_ghost, 0)
             try:
                 completion_message = story_manager.get_ghost_completion(current_ghost, rune_index)
-                await update.message.reply_text(completion_message, reply_markup=get_ghost_keyboard(is_passed=True))
+                sent_message = await update.message.reply_text(completion_message, reply_markup=get_ghost_keyboard(is_passed=True))
             except IndexError:
                 # Если индекс руны выходит за пределы, используем последнюю доступную
                 max_rune_index = min(rune_index, len(Config.RUNES) - 1)
                 completion_message = story_manager.get_ghost_completion(current_ghost, max_rune_index)
-                await update.message.reply_text(completion_message, reply_markup=get_ghost_keyboard(is_passed=True))
+                sent_message = await update.message.reply_text(completion_message, reply_markup=get_ghost_keyboard(is_passed=True))
         else:
-            await update.message.reply_text("История этого призрака пока неизвестна.", reply_markup=get_ghost_keyboard())
+            sent_message = await update.message.reply_text("История этого призрака пока неизвестна.", reply_markup=get_ghost_keyboard())
+        # Сохраняем текущие сообщения для последующего удаления
+        await save_current_conversation(user_data, current_user_message_id, sent_message.message_id)
         return IN_GHOST
     
     # Если призрак уже пройден и финал не пройден, отвечаем тишиной
     if current_ghost in passed_ghosts and not final_passed:
-        await update.message.reply_text(
+        # Удаляем предыдущий диалог перед показом тишины
+        await delete_previous_conversation(update, context)
+        sent_message = await update.message.reply_text(
             story_manager.get_silence_message(),
             reply_markup=get_ghost_keyboard(is_passed=True)
         )
+        # Сохраняем текущие сообщения для последующего удаления
+        await save_current_conversation(user_data, current_user_message_id, sent_message.message_id)
         return IN_GHOST
     
     # Основная логика для непройденного призрака до финала
     ghost_data = Config.GHOSTS[current_ghost]
     if normalize_text(user_input) == normalize_text(ghost_data["password"]):
+        # Удаляем предыдущий диалог перед показом сюжетного сообщения
+        await delete_previous_conversation(update, context)
+        
         # Призрак пройден!
         passed_ghosts.add(current_ghost)
         user_data[USER_PASSED_GHOSTS] = passed_ghosts
         
         collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
-        # Не увеличиваем collected_runes если уже достигли максимума
         if collected_runes < len(Config.RUNES):
             collected_runes += 1
             user_data[USER_COLLECTED_RUNES] = collected_runes
@@ -268,18 +310,36 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
             completion_message,
             reply_markup=get_ghost_keyboard(is_passed=True)
         )
+        # СЮЖЕТНОЕ сообщение - НЕ сохраняем для удаления
         return IN_GHOST
     
     # Проверка классификаторов для неправильного пароля
     if classifier_manager.is_malicious(user_input, user_data, current_ghost):
+        # Удаляем предыдущий диалог перед показом отказа
+        await delete_previous_conversation(update, context)
         rejection_message = classifier_manager.get_rejection_message()
-        await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())
+        sent_message = await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())
+        # Сохраняем текущие сообщения для последующего удаления
+        await save_current_conversation(user_data, current_user_message_id, sent_message.message_id)
         return IN_GHOST
+    
+    # Удаляем предыдущий диалог перед новым запросом к LLM
+    await delete_previous_conversation(update, context)
     
     # Получение ответа от LLM
     llm_response = llm_client.process_user_input(user_input, current_ghost)
-    await update.message.reply_text(llm_response, reply_markup=get_ghost_keyboard())
+    sent_message = await update.message.reply_text(llm_response, reply_markup=get_ghost_keyboard())
+    
+    # Сохраняем текущие сообщения для последующего удаления
+    await save_current_conversation(user_data, current_user_message_id, sent_message.message_id)
+    
     return IN_GHOST
+
+# ... остальные функции (handle_final_selection, continue_final_part2, handle_ending, continue_ending_part2, handle_ending1, handle_ending2, handle_ending3, handle_remember, cancel, error_handler, main) остаются без изменений ...
+
+# Остальные функции (handle_final_selection, continue_final_part2, handle_ending, continue_ending_part2, 
+# handle_ending1, handle_ending2, handle_ending3, handle_remember, cancel, error_handler, main) 
+# остаются без изменений, как в предыдущем коде
 
 async def handle_final_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка выбора финала"""

@@ -10,3 +10,7 @@ USER_CURRENT_GHOST = 'user_current_ghost'
 USER_COLLECTED_RUNES = 'user_collected_runes'
 USER_FINAL_PASSED = 'user_final_passed'
 USER_GHOST_RUNE_MAPPING = 'user_ghost_rune_mapping'
+
+# Новые ключи для управления сообщениями
+USER_PREVIOUS_USER_MESSAGE_ID = 'user_previous_user_message_id'
+USER_PREVIOUS_BOT_MESSAGE_ID = 'user_previous_bot_message_id'

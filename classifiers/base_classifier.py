@@ -5,7 +5,7 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import os 
 import re
-from .models.models import TFIDFClassifier
+import pickle
 
 class MyLSTM(nn.Module):
     def __init__(self, vocab_size, embedding_dim, hidden_dim, num_classes, embedding_matrix):
@@ -138,41 +138,31 @@ class LSTM(BaseClassifier):
         return "LSTM"
 
 class TF_IDF(BaseClassifier):
+    
+    def load_model(self,filename="model.pkl"):
+        with open(filename, 'rb') as f:
+            model_data = pickle.load(f)
+        return model_data
+
     def __init__(self):
         super().__init__()
-        self.model_path = os.path.join("classifiers", "models", "tfidf_classifier.pth")
-        self.model = self.load_tf_idf(self.model_path)
+        self.model_path = os.path.join("classifiers", "models", "tfidf_classifier.pkl")
+        self.model_data = self.load_model(self.model_path)
+        self.clf = self.model_data['model']
+        self.vectorizer = self.model_data['vectorizer']
+        self.label_encoder = self.model_data['label_encoder']
 
 
-    def load_tf_idf(self,model_path):
-        checkpoint = torch.load(
-                model_path, 
-                map_location='cuda' if torch.cuda.is_available() else 'cpu',
-                weights_only=False
-            )
-        print("OK")
-        self.vectorizer = checkpoint["vectorizer"]
-        self.label_encoder = checkpoint["label_encoder"]
-
-        model = TFIDFClassifier(
-            input_size=checkpoint["input_size"],
-            num_classes=checkpoint["num_classes"]
-        )
-        model.load_state_dict(checkpoint["model_state_dict"])
-        model.eval()
-        return model
 
     def classify(self, text: str) -> int:
-        cleaned_query = clean_and_tokenize_for_tf_idf(text)
-        print(text)
-        query_tfidf = self.vectorizer.transform([cleaned_query]).toarray()
-        query_tensor = torch.FloatTensor(query_tfidf)
+        query = text
 
-        with torch.no_grad():
-            outputs = self.model(query_tensor)
-            predicted_class_idx = torch.argmax(outputs, dim=1).item()
+        cleaned_query = clean_and_tokenize_for_tf_idf(query)
+        query_tfidf = self.vectorizer.transform([cleaned_query]).toarray()
+        y_pred = self.clf.predict(query_tfidf)
             
-        predicted_class = self.label_encoder.inverse_transform([predicted_class_idx])[0]
+        predicted_class = self.label_encoder.inverse_transform([y_pred])[0]
+
         return 1 if str(predicted_class) == "unsafe" else 0
     
     def get_name(self) -> str:

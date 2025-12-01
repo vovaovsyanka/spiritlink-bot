@@ -55,6 +55,85 @@ async def save_current_conversation(user_data, user_message_id, bot_message_id):
     user_data[USER_PREVIOUS_USER_MESSAGE_ID] = user_message_id
     user_data[USER_PREVIOUS_BOT_MESSAGE_ID] = bot_message_id
 
+def get_ghost_level(ghost_id: int, user_data: dict) -> int:
+    """Получить уровень сложности для призрака"""
+    ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
+    if ghost_id in ghosts_order:
+        return ghosts_order.index(ghost_id) + 1
+    return None  # Возвращаем None если призрак еще не выбран
+
+def get_ghost_display_name(ghost_id: int, user_data: dict) -> str:
+    """Получить отображаемое имя призрака с уровнем (только если уровень есть)"""
+    ghost = Config.GHOSTS[ghost_id]
+    level = get_ghost_level(ghost_id, user_data)
+    if level is not None:
+        return f"{ghost['name']} - {level} уровень"
+    return ghost['name']
+
+def assign_random_password(ghost_id: int, user_data: dict) -> str:
+    """Назначить случайный пароль для призрака"""
+    ghost = Config.GHOSTS[ghost_id]
+    passwords = ghost.get('passwords', [])
+    if not passwords:
+        return ""
+    
+    # Получаем уже использованные пароли для этого призрака
+    used_passwords_key = f'ghost_{ghost_id}_used_passwords'
+    used_passwords = user_data.get(used_passwords_key, [])
+    
+    # Фильтруем доступные пароли (исключаем уже использованные)
+    available_passwords = [p for p in passwords if p not in used_passwords]
+    
+    # Если все пароли использованы, сбрасываем список использованных
+    if not available_passwords:
+        available_passwords = passwords
+        # Очищаем список использованных паролей
+        user_data[used_passwords_key] = []
+    
+    # Выбираем случайный пароль из доступных
+    password = random.choice(available_passwords)
+    
+    # Сохраняем текущий пароль
+    password_key = f'ghost_{ghost_id}_password'
+    user_data[password_key] = password
+    
+    return password
+
+def get_current_password(ghost_id: int, user_data: dict) -> str:
+    """Получить текущий пароль для призрака"""
+    # Проверяем, есть ли сохраненный пароль для этого призрака
+    password_key = f'ghost_{ghost_id}_password'
+    if password_key in user_data:
+        return user_data[password_key]
+    
+    # Если нет, назначаем новый случайный пароль
+    return assign_random_password(ghost_id, user_data)
+
+def save_used_password(ghost_id: int, password: str, user_data: dict):
+    """Сохранить отгаданный пароль для истории"""
+    # Сохраняем последний отгаданный пароль
+    last_used_key = f'ghost_{ghost_id}_last_used_password'
+    user_data[last_used_key] = password
+    
+    # Добавляем в список использованных паролей
+    used_passwords_key = f'ghost_{ghost_id}_used_passwords'
+    used_passwords = user_data.get(used_passwords_key, [])
+    if password not in used_passwords:
+        used_passwords.append(password)
+        user_data[used_passwords_key] = used_passwords
+
+def get_last_used_password(ghost_id: int, user_data: dict) -> str:
+    """Получить последний отгаданный пароль для истории"""
+    last_used_key = f'ghost_{ghost_id}_last_used_password'
+    return user_data.get(last_used_key, "")
+
+def reset_ghost_password_for_replay(ghost_id: int, user_data: dict) -> str:
+    """Сбросить пароль призрака и назначить новый случайный (для повторного прохождения после финала)"""
+    password_key = f'ghost_{ghost_id}_password'
+    if password_key in user_data:
+        del user_data[password_key]
+    return assign_random_password(ghost_id, user_data)
+
 def get_ghosts_keyboard(user_data):
     """Получить клавиатуру с призраками"""
     passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
@@ -63,7 +142,7 @@ def get_ghosts_keyboard(user_data):
     
     for ghost_id in range(1, 6):
         ghost = Config.GHOSTS[ghost_id]
-        button_text = f"{ghost['name']}"
+        button_text = get_ghost_display_name(ghost_id, user_data)
         if ghost_id in passed_ghosts and not final_passed:
             button_text += " ✅"
         keyboard.append([KeyboardButton(button_text)])
@@ -152,11 +231,14 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("Соберите все 5 рун сначала.")
             return GHOST_SELECTION
     
-    # Определяем какой призрак выбран
+    # Определяем какой призрак выбран по отображаемому имени или обычному имени
     ghost_id = None
     for gid in range(1, 6):
+        display_name = get_ghost_display_name(gid, user_data)
         ghost_name = Config.GHOSTS[gid]["name"]
-        if ghost_name in user_message:
+        
+        # Проверяем оба варианта имени
+        if display_name in user_message or ghost_name in user_message:
             ghost_id = gid
             break
     
@@ -166,17 +248,40 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
     
     user_data[USER_CURRENT_GHOST] = ghost_id
     
+    # Добавляем призрак в порядок выбора если его там нет
+    ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
+    if ghost_id not in ghosts_order:
+        ghosts_order.append(ghost_id)
+        user_data[USER_GHOSTS_ORDER] = ghosts_order
+    
+    # Устанавливаем уровень сложности
+    level = get_ghost_level(ghost_id, user_data)
+    
     passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
     final_passed = user_data.get(USER_FINAL_PASSED, False)
     
-    # Если финал пройден, всегда показываем первое сообщение призрака
+    # Если финал пройден, всегда генерируем новый пароль
     if final_passed:
-        ghost_intro = story_manager.get_ghost_intro(ghost_id)
+        # Генерируем новый случайный пароль для повторного прохождения
+        reset_ghost_password_for_replay(ghost_id, user_data)
+        
+        if level is not None:
+            ghost_intro = story_manager.get_ghost_intro(ghost_id, level)
+        else:
+            ghost_intro = story_manager.get_ghost_intro(ghost_id, 1)
+        
         await update.message.reply_text(
             ghost_intro,
-            reply_markup=get_ghost_keyboard(is_passed=True)
+            reply_markup=get_ghost_keyboard(is_passed=False)  # is_passed=False, потому что после финала можно проходить снова
         )
         return IN_GHOST
+    
+    # Если призрак еще не пройден, получаем/генерируем пароль
+    if ghost_id not in passed_ghosts:
+        # Получаем текущий пароль (если нет - создается новый)
+        current_password = get_current_password(ghost_id, user_data)
+        if not current_password:
+            current_password = assign_random_password(ghost_id, user_data)
     
     # Проверяем пройден ли призрак (без финала)
     if ghost_id in passed_ghosts:
@@ -187,20 +292,14 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
         )
         return IN_GHOST
     
-    # Новый призрак - добавляем в порядок выбора если его там нет
-    ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
-    if ghost_id not in ghosts_order:
-        ghosts_order.append(ghost_id)
-        user_data[USER_GHOSTS_ORDER] = ghosts_order
-    
-    # Получаем индекс призрака в порядке выбора для определения уровня защиты
-    ghost_index = ghosts_order.index(ghost_id)
-    
-    # Отправляем первое сообщение призрака
-    ghost_intro = story_manager.get_ghost_intro(ghost_id)
+    # Получаем первое сообщение призрака с уровнем (если есть)
+    if level is not None:
+        ghost_intro = story_manager.get_ghost_intro(ghost_id, level)
+    else:
+        ghost_intro = story_manager.get_ghost_intro(ghost_id, 1)
     
     # Для первого призрака добавляем инструкцию
-    if ghost_index == 0 and ghost_id not in passed_ghosts:
+    if level == 1 and ghost_id not in passed_ghosts:
         ghost_intro += story_manager.get_spiritlink_instruction()
     
     await update.message.reply_text(
@@ -239,21 +338,31 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     elif user_input == "подсказка":
         # Удаляем предыдущий диалог перед показом подсказки
         await delete_previous_conversation(update, context)
-        hint = random.choice(Config.HINTS)
+        if classifier_manager.get_current_classifier_name(user_data, current_ghost) == "ruBert":
+            hint = random.choice(Config.HINTS_RUBERT)
+        else:
+            hint = random.choice(Config.HINTS)
         sent_message = await update.message.reply_text(f"*Подсказка:* {hint}", reply_markup=get_ghost_keyboard(is_passed=(current_ghost in passed_ghosts)))
         # Сохраняем текущие сообщения для последующего удаления
         await save_current_conversation(user_data, current_user_message_id, sent_message.message_id)
         return IN_GHOST
+
     
     elif user_input == "история":
         # Удаляем предыдущий диалог перед показом истории
         await delete_previous_conversation(update, context)
-        if current_ghost in passed_ghosts:
+        if current_ghost in passed_ghosts or final_passed:
             # Показываем историю пройденного призрака
             ghost_rune_mapping = user_data.get(USER_GHOST_RUNE_MAPPING, {})
             rune_index = ghost_rune_mapping.get(current_ghost, 0)
             try:
                 completion_message = story_manager.get_ghost_completion(current_ghost, rune_index)
+                # Заменяем основной пароль на последний отгаданный
+                last_used_password = get_last_used_password(current_ghost, user_data)
+                if last_used_password:
+                    ghost_data = Config.GHOSTS[current_ghost]
+                    first_password = ghost_data["passwords"][0] if ghost_data.get("passwords") else ""
+                    completion_message = completion_message.replace(f'\"{first_password}\"', f'\"{last_used_password}\"')
                 sent_message = await update.message.reply_text(completion_message, reply_markup=get_ghost_keyboard(is_passed=True))
             except IndexError:
                 # Если индекс руны выходит за пределы, используем последнюю доступную
@@ -278,38 +387,59 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         await save_current_conversation(user_data, current_user_message_id, sent_message.message_id)
         return IN_GHOST
     
+    # Получаем текущий пароль для призрака
+    current_password = get_current_password(current_ghost, user_data)
+    
     # Основная логика для непройденного призрака до финала
-    ghost_data = Config.GHOSTS[current_ghost]
-    if normalize_text(user_input) == normalize_text(ghost_data["password"]):
+    if normalize_text(user_input) == normalize_text(current_password):
         # Удаляем предыдущий диалог перед показом сюжетного сообщения
         await delete_previous_conversation(update, context)
         
-        # Призрак пройден!
-        passed_ghosts.add(current_ghost)
-        user_data[USER_PASSED_GHOSTS] = passed_ghosts
+        # Сохраняем отгаданный пароль
+        save_used_password(current_ghost, current_password, user_data)
         
-        collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
-        if collected_runes < len(Config.RUNES):
-            collected_runes += 1
-            user_data[USER_COLLECTED_RUNES] = collected_runes
-        
-        # Сохраняем соответствие призрак -> руна
-        ghost_rune_mapping = user_data.get(USER_GHOST_RUNE_MAPPING, {})
-        if current_ghost not in ghost_rune_mapping:
-            # Используем порядок выбора для определения номера руны
-            ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
-            rune_index = ghosts_order.index(current_ghost)
-            ghost_rune_mapping[current_ghost] = rune_index
-            user_data[USER_GHOST_RUNE_MAPPING] = ghost_rune_mapping
+        # Если финал не пройден, добавляем призрак в пройденные
+        if not final_passed:
+            passed_ghosts.add(current_ghost)
+            user_data[USER_PASSED_GHOSTS] = passed_ghosts
+            
+            collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
+            if collected_runes < len(Config.RUNES):
+                collected_runes += 1
+                user_data[USER_COLLECTED_RUNES] = collected_runes
+            
+            # Сохраняем соответствие призрак -> руна
+            ghost_rune_mapping = user_data.get(USER_GHOST_RUNE_MAPPING, {})
+            if current_ghost not in ghost_rune_mapping:
+                # Используем порядок выбора для определения номера руны
+                ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
+                rune_index = ghosts_order.index(current_ghost)
+                ghost_rune_mapping[current_ghost] = rune_index
+                user_data[USER_GHOST_RUNE_MAPPING] = ghost_rune_mapping
         
         # Получаем сообщение завершения
-        rune_index = ghost_rune_mapping[current_ghost]
+        rune_index = 0
+        if not final_passed:
+            rune_index = user_data.get(USER_GHOST_RUNE_MAPPING, {}).get(current_ghost, 0)
+        
         completion_message = story_manager.get_ghost_completion(current_ghost, rune_index)
+        
+        # Заменяем пароль в сообщении на фактически отгаданный
+        ghost_data = Config.GHOSTS[current_ghost]
+        first_password = ghost_data["passwords"][0] if ghost_data.get("passwords") else ""
+        completion_message = completion_message.replace(f'\"{first_password}\"', f'\"{current_password}\"')
+        
+        # Генерируем новый пароль для следующего раза
+        # Если финал не пройден, пароль больше не нужен (призрак пройден)
+        # Если финал пройден, генерируем новый пароль для следующей попытки
+        if final_passed:
+            assign_random_password(current_ghost, user_data)
         
         await update.message.reply_text(
             completion_message,
-            reply_markup=get_ghost_keyboard(is_passed=True)
+            reply_markup=get_ghost_keyboard(is_passed=(not final_passed))
         )
+        
         # СЮЖЕТНОЕ сообщение - НЕ сохраняем для удаления
         return IN_GHOST
     
@@ -317,6 +447,7 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     if classifier_manager.is_malicious(user_input, user_data, current_ghost):
         # Удаляем предыдущий диалог перед показом отказа
         await delete_previous_conversation(update, context)
+        await asyncio.sleep(18)
         rejection_message = classifier_manager.get_rejection_message()
         sent_message = await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())
         # Сохраняем текущие сообщения для последующего удаления
@@ -326,20 +457,14 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     # Удаляем предыдущий диалог перед новым запросом к LLM
     await delete_previous_conversation(update, context)
     
-    # Получение ответа от LLM
-    llm_response = llm_client.process_user_input(user_input, current_ghost)
+    # Получение ответа от LLM (передаем текущий пароль)
+    llm_response = llm_client.process_user_input(user_input, current_ghost, current_password)
     sent_message = await update.message.reply_text(llm_response, reply_markup=get_ghost_keyboard())
     
     # Сохраняем текущие сообщения для последующего удаления
     await save_current_conversation(user_data, current_user_message_id, sent_message.message_id)
     
     return IN_GHOST
-
-# ... остальные функции (handle_final_selection, continue_final_part2, handle_ending, continue_ending_part2, handle_ending1, handle_ending2, handle_ending3, handle_remember, cancel, error_handler, main) остаются без изменений ...
-
-# Остальные функции (handle_final_selection, continue_final_part2, handle_ending, continue_ending_part2, 
-# handle_ending1, handle_ending2, handle_ending3, handle_remember, cancel, error_handler, main) 
-# остаются без изменений, как в предыдущем коде
 
 async def handle_final_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка выбора финала"""

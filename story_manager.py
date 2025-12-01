@@ -22,11 +22,12 @@ class StoryManager:
         )
     
     @staticmethod
-    def get_ghost_intro(ghost_id: int) -> str:
-        """Получить первое сообщение для призрака"""
+    def get_ghost_intro(ghost_id: int, level: int = 1) -> str:
+        """Получить первое сообщение для призрака с указанием уровня"""
         ghost = Config.GHOSTS[ghost_id]
         return (
             f">>> ВЫБРАН: {ghost['location']}\n\n"
+            f"Уровень сложности: {level}\n\n"
             f"Природа: {ghost['nature']}.\n"
             f"Идентификация: {ghost['identification']}.\n\n"
             f"{ghost['description']}"
@@ -43,7 +44,7 @@ class StoryManager:
         rune_data = Config.RUNES[rune_index]
         
         return (
-            f"Слово-Якорь введено в «SpiritLink»: \"{ghost['password']}\"\n\n"
+            f"Слово-Якорь введено в «SpiritLink»: \"{ghost['passwords'][0]}\"\n\n"
             f"{ghost['completion_description']}\n\n"
             f"История поглощенного призрака:\n"
             f"{ghost['story']}\n\n"

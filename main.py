@@ -11,11 +11,17 @@ from story_manager import StoryManager
 from classifiers.classifier_manager import ClassifierManager
 from llm.llm_client import LLMClient
 from states import *
-from utils import setup_logging, normalize_text
+from utils import (
+    setup_logging, normalize_text, typing_while_waiting, ghost_to_image
+)
+from pathlib import Path
+import asyncio
 
 # Настройка логирования
 setup_logging()
 logger = logging.getLogger(__name__)
+
+IMG_DIR = Path('images')
 
 # Инициализация менеджеров
 story_manager = StoryManager()
@@ -62,13 +68,13 @@ def get_ghost_level(ghost_id: int, user_data: dict) -> int:
         return ghosts_order.index(ghost_id) + 1
     return None  # Возвращаем None если призрак еще не выбран
 
-def get_ghost_display_name(ghost_id: int, user_data: dict) -> str:
+def get_ghost_display_name(ghost_id: int, user_data: dict, name_only: bool=False) -> str:
     """Получить отображаемое имя призрака с уровнем (только если уровень есть)"""
     ghost = Config.GHOSTS[ghost_id]
     level = get_ghost_level(ghost_id, user_data)
-    if level is not None:
-        return f"{ghost['name']} - {level} уровень"
-    return ghost['name']
+    if level is None or name_only:
+        return ghost['name']
+    return f"{ghost['name']} - {level} уровень"
 
 def assign_random_password(ghost_id: int, user_data: dict) -> str:
     """Назначить случайный пароль для призрака"""
@@ -302,10 +308,17 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
     if level == 1 and ghost_id not in passed_ghosts:
         ghost_intro += story_manager.get_spiritlink_instruction()
     
-    await update.message.reply_text(
-        ghost_intro,
-        reply_markup=get_ghost_keyboard()
-    )
+    img_name = ghost_to_image(get_ghost_display_name(gid, user_data, name_only=True))
+    with open(IMG_DIR / img_name, "rb") as img:
+        await update.message.reply_photo(
+            photo=img,
+            caption=ghost_intro,
+            reply_markup=get_ghost_keyboard(is_passed=False)  # is_passed=False, потому что после финала можно проходить снова
+        )
+    # await update.message.reply_text(
+    #     ghost_intro,
+    #     reply_markup=get_ghost_keyboard()
+    # )
     
     return IN_GHOST
 
@@ -447,7 +460,14 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     if classifier_manager.is_malicious(user_input, user_data, current_ghost):
         # Удаляем предыдущий диалог перед показом отказа
         await delete_previous_conversation(update, context)
-        await asyncio.sleep(18)
+        remaining = random.uniform(13, 25)
+        while remaining > 0:
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id,
+                action="typing"
+            )
+            await asyncio.sleep(4)
+            remaining -= 4
         rejection_message = classifier_manager.get_rejection_message()
         sent_message = await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())
         # Сохраняем текущие сообщения для последующего удаления
@@ -457,8 +477,17 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     # Удаляем предыдущий диалог перед новым запросом к LLM
     await delete_previous_conversation(update, context)
     
-    # Получение ответа от LLM (передаем текущий пароль)
-    llm_response = llm_client.process_user_input(user_input, current_ghost, current_password)
+    # Создаём асинхронную задачу для LLM (нужно, даже если метод синхронный)
+    loop = asyncio.get_event_loop()
+    llm_task = loop.run_in_executor(None, llm_client.process_user_input, user_input, current_ghost, current_password)
+
+    # Показываем “печатает…” пока LLM считает ответ
+    await typing_while_waiting(context, update.effective_chat.id, llm_task)
+
+    # Когда LLM готов — забираем результат
+    llm_response = await llm_task
+
+    # Отправляем сообщение
     sent_message = await update.message.reply_text(llm_response, reply_markup=get_ghost_keyboard())
     
     # Сохраняем текущие сообщения для последующего удаления

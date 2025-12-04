@@ -17,13 +17,11 @@ from utils import (
 from pathlib import Path
 import asyncio
 
-# Настройка логирования
 setup_logging()
 logger = logging.getLogger(__name__)
 
 IMG_DIR = Path('images')
 
-# Инициализация менеджеров
 story_manager = StoryManager()
 classifier_manager = ClassifierManager()
 llm_client = LLMClient()
@@ -32,7 +30,6 @@ async def delete_previous_conversation(update: Update, context: ContextTypes.DEF
     """Удаляет предыдущие сообщения диалога с LLM"""
     user_data = context.user_data
     
-    # Удаляем предыдущее сообщение пользователя
     if USER_PREVIOUS_USER_MESSAGE_ID in user_data:
         try:
             await context.bot.delete_message(
@@ -42,7 +39,6 @@ async def delete_previous_conversation(update: Update, context: ContextTypes.DEF
         except Exception as e:
             logger.warning(f"Не удалось удалить предыдущее сообщение пользователя: {e}")
     
-    # Удаляем предыдущий ответ бота (LLM, подсказка, история)
     if USER_PREVIOUS_BOT_MESSAGE_ID in user_data:
         try:
             await context.bot.delete_message(
@@ -52,7 +48,6 @@ async def delete_previous_conversation(update: Update, context: ContextTypes.DEF
         except Exception as e:
             logger.warning(f"Не удалось удалить предыдущее сообщение бота: {e}")
     
-    # Очищаем сохраненные ID предыдущих сообщений
     user_data.pop(USER_PREVIOUS_USER_MESSAGE_ID, None)
     user_data.pop(USER_PREVIOUS_BOT_MESSAGE_ID, None)
 
@@ -66,7 +61,7 @@ def get_ghost_level(ghost_id: int, user_data: dict) -> int:
     ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
     if ghost_id in ghosts_order:
         return ghosts_order.index(ghost_id) + 1
-    return None  # Возвращаем None если призрак еще не выбран
+    return None 
 
 def get_ghost_display_name(ghost_id: int, user_data: dict, name_only: bool=False) -> str:
     """Получить отображаемое имя призрака с уровнем (только если уровень есть)"""
@@ -83,45 +78,34 @@ def assign_random_password(ghost_id: int, user_data: dict) -> str:
     if not passwords:
         return ""
     
-    # Получаем уже использованные пароли для этого призрака
     used_passwords_key = f'ghost_{ghost_id}_used_passwords'
     used_passwords = user_data.get(used_passwords_key, [])
     
-    # Фильтруем доступные пароли (исключаем уже использованные)
     available_passwords = [p for p in passwords if p not in used_passwords]
     
-    # Если все пароли использованы, сбрасываем список использованных
     if not available_passwords:
         available_passwords = passwords
-        # Очищаем список использованных паролей
         user_data[used_passwords_key] = []
     
-    # Выбираем случайный пароль из доступных
     password = random.choice(available_passwords)
     
-    # Сохраняем текущий пароль
     password_key = f'ghost_{ghost_id}_password'
     user_data[password_key] = password
     
     return password
 
 def get_current_password(ghost_id: int, user_data: dict) -> str:
-    """Получить текущий пароль для призрака"""
-    # Проверяем, есть ли сохраненный пароль для этого призрака
     password_key = f'ghost_{ghost_id}_password'
     if password_key in user_data:
         return user_data[password_key]
     
-    # Если нет, назначаем новый случайный пароль
     return assign_random_password(ghost_id, user_data)
 
 def save_used_password(ghost_id: int, password: str, user_data: dict):
     """Сохранить отгаданный пароль для истории"""
-    # Сохраняем последний отгаданный пароль
     last_used_key = f'ghost_{ghost_id}_last_used_password'
     user_data[last_used_key] = password
     
-    # Добавляем в список использованных паролей
     used_passwords_key = f'ghost_{ghost_id}_used_passwords'
     used_passwords = user_data.get(used_passwords_key, [])
     if password not in used_passwords:
@@ -315,10 +299,6 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
             caption=ghost_intro,
             reply_markup=get_ghost_keyboard(is_passed=False)  # is_passed=False, потому что после финала можно проходить снова
         )
-    # await update.message.reply_text(
-    #     ghost_intro,
-    #     reply_markup=get_ghost_keyboard()
-    # )
     
     return IN_GHOST
 
@@ -332,15 +312,11 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("Ошибка: призрак не выбран.")
         return GHOST_SELECTION
     
-    passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
-    final_passed = user_data.get(USER_FINAL_PASSED, False)
-    
     # Сохраняем ID текущего сообщения пользователя
     current_user_message_id = update.message.message_id
     
     # Обработка специальных кнопок
     if user_input == "вернуться к выбору сигнала":
-        # Удаляем предыдущий диалог при возврате
         await delete_previous_conversation(update, context)
         await update.message.reply_text(
             "Возвращаюсь к списку сигналов...",
@@ -351,11 +327,18 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     elif user_input == "подсказка":
         # Удаляем предыдущий диалог перед показом подсказки
         await delete_previous_conversation(update, context)
-        if classifier_manager.get_current_classifier_name(user_data, current_ghost) == "ruBert":
-            hint = random.choice(Config.HINTS_RUBERT)
-        else:
-            hint = random.choice(Config.HINTS)
-        sent_message = await update.message.reply_text(f"*Подсказка:* {hint}", reply_markup=get_ghost_keyboard(is_passed=(current_ghost in passed_ghosts)))
+        
+        # Получаем подсказку от менеджера классификаторов
+        hint = classifier_manager.get_hint(user_data, current_ghost)
+        
+        # Определяем, пройден ли призрак для правильного отображения клавиатуры
+        passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
+        
+        sent_message = await update.message.reply_text(
+            f"*Подсказка:* {hint}", 
+            reply_markup=get_ghost_keyboard(is_passed=(current_ghost in passed_ghosts))
+        )
+        
         # Сохраняем текущие сообщения для последующего удаления
         await save_current_conversation(user_data, current_user_message_id, sent_message.message_id)
         return IN_GHOST

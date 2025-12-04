@@ -312,6 +312,9 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("Ошибка: призрак не выбран.")
         return GHOST_SELECTION
     
+    passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
+    final_passed = user_data.get(USER_FINAL_PASSED, False)
+    
     # Сохраняем ID текущего сообщения пользователя
     current_user_message_id = update.message.message_id
     

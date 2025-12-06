@@ -11,10 +11,12 @@
 1. Клонируйте репозиторий:
 ```bash
 git clone https://github.com/ваш-username/ваш-репозиторий.git
+```
 
 2. Установите зависимости:
 ```bash
 pip install -r requirements.txt
+```
 
 3. Создайте переменные окружения:
 BOT_TOKEN=your_telegram_bot_token
@@ -24,3 +26,4 @@ OLLAMA_API_KEY2=your_backup_ollama_api_key
 4. Запустите бота:
 ```bash
 python main.py
+```

@@ -203,15 +203,12 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
     user_message = update.message.text
     user_data = context.user_data
     
-    # Очищаем предыдущий диалог при смене призрака
     user_data.pop(USER_PREVIOUS_USER_MESSAGE_ID, None)
     user_data.pop(USER_PREVIOUS_BOT_MESSAGE_ID, None)
     
-    # Проверяем нажата ли кнопка финала
     if user_message == "все руны собраны...":
         collected_runes = user_data.get(USER_COLLECTED_RUNES, 0)
         if collected_runes >= 5:
-            # Первое сообщение финала
             await update.message.reply_text(
                 Config.FINAL_MESSAGES["part1"],
                 reply_markup=get_continue_keyboard()
@@ -221,13 +218,11 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("Соберите все 5 рун сначала.")
             return GHOST_SELECTION
     
-    # Определяем какой призрак выбран по отображаемому имени или обычному имени
     ghost_id = None
     for gid in range(1, 6):
         display_name = get_ghost_display_name(gid, user_data)
         ghost_name = Config.GHOSTS[gid]["name"]
         
-        # Проверяем оба варианта имени
         if display_name in user_message or ghost_name in user_message:
             ghost_id = gid
             break
@@ -238,21 +233,17 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
     
     user_data[USER_CURRENT_GHOST] = ghost_id
     
-    # Добавляем призрак в порядок выбора если его там нет
     ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
     if ghost_id not in ghosts_order:
         ghosts_order.append(ghost_id)
         user_data[USER_GHOSTS_ORDER] = ghosts_order
     
-    # Устанавливаем уровень сложности
     level = get_ghost_level(ghost_id, user_data)
     
     passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
     final_passed = user_data.get(USER_FINAL_PASSED, False)
     
-    # Если финал пройден, всегда генерируем новый пароль
     if final_passed:
-        # Генерируем новый случайный пароль для повторного прохождения
         reset_ghost_password_for_replay(ghost_id, user_data)
         
         if level is not None:
@@ -262,33 +253,27 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
         
         await update.message.reply_text(
             ghost_intro,
-            reply_markup=get_ghost_keyboard(is_passed=False)  # is_passed=False, потому что после финала можно проходить снова
+            reply_markup=get_ghost_keyboard(is_passed=False) 
         )
         return IN_GHOST
     
-    # Если призрак еще не пройден, получаем/генерируем пароль
     if ghost_id not in passed_ghosts:
-        # Получаем текущий пароль (если нет - создается новый)
         current_password = get_current_password(ghost_id, user_data)
         if not current_password:
             current_password = assign_random_password(ghost_id, user_data)
     
-    # Проверяем пройден ли призрак (без финала)
     if ghost_id in passed_ghosts:
-        # Призрак уже пройден до финала
         await update.message.reply_text(
             story_manager.get_empty_location_message(),
             reply_markup=get_ghost_keyboard(is_passed=True)
         )
         return IN_GHOST
     
-    # Получаем первое сообщение призрака с уровнем (если есть)
     if level is not None:
         ghost_intro = story_manager.get_ghost_intro(ghost_id, level)
     else:
         ghost_intro = story_manager.get_ghost_intro(ghost_id, 1)
     
-    # Для первого призрака добавляем инструкцию
     if level == 1 and ghost_id not in passed_ghosts:
         ghost_intro += story_manager.get_spiritlink_instruction()
     
@@ -297,7 +282,7 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_photo(
             photo=img,
             caption=ghost_intro,
-            reply_markup=get_ghost_keyboard(is_passed=False)  # is_passed=False, потому что после финала можно проходить снова
+            reply_markup=get_ghost_keyboard(is_passed=False) 
         )
     
     return IN_GHOST
@@ -315,10 +300,8 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
     final_passed = user_data.get(USER_FINAL_PASSED, False)
     
-    # Сохраняем ID текущего сообщения пользователя
     current_user_message_id = update.message.message_id
     
-    # Обработка специальных кнопок
     if user_input == "вернуться к выбору сигнала":
         await delete_previous_conversation(update, context)
         await update.message.reply_text(
@@ -328,10 +311,7 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         return GHOST_SELECTION
     
     elif user_input == "подсказка":
-        # Удаляем предыдущий диалог перед показом подсказки
         await delete_previous_conversation(update, context)
-        
-        # Получаем подсказку от менеджера классификаторов
         hint = classifier_manager.get_hint(user_data, current_ghost)
         
         # Определяем, пройден ли призрак для правильного отображения клавиатуры
@@ -452,7 +432,7 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
                 chat_id=update.effective_chat.id,
                 action="typing"
             )
-            await asyncio.sleep(4)
+            # await asyncio.sleep(4)
             remaining -= 4
         rejection_message = classifier_manager.get_rejection_message()
         sent_message = await update.message.reply_text(rejection_message, reply_markup=get_ghost_keyboard())

@@ -14,6 +14,9 @@ from states import *
 from utils import (
     setup_logging, normalize_text, typing_while_waiting, ghost_to_image
 )
+from db.database import (
+    init_db_pool, close_db_pool, load_user_data, save_user_data
+)
 from pathlib import Path
 import asyncio
 
@@ -25,6 +28,12 @@ IMG_DIR = Path('images')
 story_manager = StoryManager()
 classifier_manager = ClassifierManager()
 llm_client = LLMClient()
+
+async def on_startup(app):
+    await init_db_pool()
+
+async def on_shutdown(app):
+    await close_db_pool()
 
 async def delete_previous_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаляет предыдущие сообщения диалога с LLM"""
@@ -172,14 +181,29 @@ def get_remember_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало разговора"""
     user_id = update.message.from_user.id
+    # загружаем persisted state
+    persisted = await load_user_data(user_id)
+    # если пользователь впервые — load_user_data создаст пустую структуру
+    # обновляем context.user_data (вместо перезаписи нужно merge, чтобы не потерять runtime-данные)
+    context.user_data.update(persisted)
+
+    # но всё равно корректно инициализуйте ключи, если их нет:
+    context.user_data.setdefault(USER_GHOSTS_ORDER, [])
+    context.user_data.setdefault(USER_PASSED_GHOSTS, set())
+    context.user_data.setdefault(USER_CURRENT_GHOST, None)
+    context.user_data.setdefault(USER_COLLECTED_RUNES, 0)
+    context.user_data.setdefault(USER_FINAL_PASSED, False)
+    context.user_data.setdefault(USER_GHOST_RUNE_MAPPING, {})
+
+    await save_user_data(update.message.from_user.id, context.user_data)
     
-    # Инициализация данных пользователя
-    context.user_data[USER_GHOSTS_ORDER] = []  # Порядок выбора призраков
-    context.user_data[USER_PASSED_GHOSTS] = set()  # Пройденные призраки
-    context.user_data[USER_CURRENT_GHOST] = None  # Текущий активный призрак
-    context.user_data[USER_COLLECTED_RUNES] = 0  # Количество собранных рун
-    context.user_data[USER_FINAL_PASSED] = False  # Пройден ли финал
-    context.user_data[USER_GHOST_RUNE_MAPPING] = {}  # Соответствие призрак -> номер руны
+    # # Инициализация данных пользователя
+    # context.user_data[USER_GHOSTS_ORDER] = []  # Порядок выбора призраков
+    # context.user_data[USER_PASSED_GHOSTS] = set()  # Пройденные призраки
+    # context.user_data[USER_CURRENT_GHOST] = None  # Текущий активный призрак
+    # context.user_data[USER_COLLECTED_RUNES] = 0  # Количество собранных рун
+    # context.user_data[USER_FINAL_PASSED] = False  # Пройден ли финал
+    # context.user_data[USER_GHOST_RUNE_MAPPING] = {}  # Соответствие призрак -> номер руны
     # Очищаем данные сообщений
     context.user_data.pop(USER_PREVIOUS_USER_MESSAGE_ID, None)
     context.user_data.pop(USER_PREVIOUS_BOT_MESSAGE_ID, None)
@@ -232,11 +256,13 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
         return GHOST_SELECTION
     
     user_data[USER_CURRENT_GHOST] = ghost_id
+    await save_user_data(update.message.from_user.id, user_data)
     
     ghosts_order = user_data.get(USER_GHOSTS_ORDER, [])
     if ghost_id not in ghosts_order:
         ghosts_order.append(ghost_id)
         user_data[USER_GHOSTS_ORDER] = ghosts_order
+        await save_user_data(update.message.from_user.id, user_data)
     
     level = get_ghost_level(ghost_id, user_data)
     
@@ -245,6 +271,7 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
     
     if final_passed:
         reset_ghost_password_for_replay(ghost_id, user_data)
+        await save_user_data(update.message.from_user.id, user_data)
         
         if level is not None:
             ghost_intro = story_manager.get_ghost_intro(ghost_id, level)
@@ -261,6 +288,7 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
         current_password = get_current_password(ghost_id, user_data)
         if not current_password:
             current_password = assign_random_password(ghost_id, user_data)
+            await save_user_data(update.message.from_user.id, user_data)
     
     if ghost_id in passed_ghosts:
         await update.message.reply_text(
@@ -277,7 +305,7 @@ async def handle_ghost_selection(update: Update, context: ContextTypes.DEFAULT_T
     if level == 1 and ghost_id not in passed_ghosts:
         ghost_intro += story_manager.get_spiritlink_instruction()
     
-    img_name = ghost_to_image(get_ghost_display_name(gid, user_data, name_only=True))
+    img_name = ghost_to_image(get_ghost_display_name(ghost_id, user_data, name_only=True))
     with open(IMG_DIR / img_name, "rb") as img:
         await update.message.reply_photo(
             photo=img,
@@ -313,6 +341,7 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     elif user_input == "подсказка":
         await delete_previous_conversation(update, context)
         hint = classifier_manager.get_hint(user_data, current_ghost)
+        await save_user_data(update.message.from_user.id, user_data)
         
         # Определяем, пройден ли призрак для правильного отображения клавиатуры
         passed_ghosts = user_data.get(USER_PASSED_GHOSTS, set())
@@ -373,9 +402,11 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
     if normalize_text(user_input) == normalize_text(current_password):
         # Удаляем предыдущий диалог перед показом сюжетного сообщения
         await delete_previous_conversation(update, context)
+        await save_user_data(update.message.from_user.id, user_data)
         
         # Сохраняем отгаданный пароль
         save_used_password(current_ghost, current_password, user_data)
+        await save_user_data(update.message.from_user.id, user_data)
         
         # Если финал не пройден, добавляем призрак в пройденные
         if not final_passed:
@@ -395,6 +426,8 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
                 rune_index = ghosts_order.index(current_ghost)
                 ghost_rune_mapping[current_ghost] = rune_index
                 user_data[USER_GHOST_RUNE_MAPPING] = ghost_rune_mapping
+            
+            await save_user_data(update.message.from_user.id, user_data)
         
         # Получаем сообщение завершения
         rune_index = 0
@@ -413,6 +446,7 @@ async def handle_ghost_interaction(update: Update, context: ContextTypes.DEFAULT
         # Если финал пройден, генерируем новый пароль для следующей попытки
         if final_passed:
             assign_random_password(current_ghost, user_data)
+            await save_user_data(update.message.from_user.id, user_data)
         
         await update.message.reply_text(
             completion_message,
@@ -522,6 +556,7 @@ async def continue_ending_part2(update: Update, context: ContextTypes.DEFAULT_TY
     # Помечаем финал как пройденный
     context.user_data[USER_FINAL_PASSED] = True
     del context.user_data['pending_ending']
+    await save_user_data(update.message.from_user.id, context.user_data)
     
     return ENDING_PART2
 
@@ -567,7 +602,13 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Запуск бота"""
     # Создаем Application
-    application = Application.builder().token(Config.BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(Config.BOT_TOKEN)
+        .post_init(on_startup)
+        .post_shutdown(on_shutdown)
+        .build()
+    )
     
     # Получаем названия концовок для фильтров
     endings = Config.FINAL_MESSAGES["endings"]
@@ -611,7 +652,22 @@ def main():
     
     # Запуск бота
     logger.info("Бот запущен...")
-    application.run_polling()
+    # application.run_polling()
+    try:
+        application.run_polling()
+    except RuntimeError as e:
+        # В случае "event loop is already running" — падает сюда (например Jupyter)
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Запускаем run_polling как фоновую задачу в уже живом loop
+            # NOTE: в таком окружении process не выйдет, поэтому делать этот fallback имеет смысл только в dev/debug
+            asyncio.ensure_future(application.run_polling())
+            # Небольшая блокировка основного потока, чтобы программа не завершилась сразу.
+            while True:
+                import time
+                time.sleep(3600)
+        else:
+            raise
 
 if __name__ == '__main__':
     main()
